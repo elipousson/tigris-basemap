@@ -24,7 +24,16 @@ ms_clip_ext <- function(target, clip = NULL, allow_null = TRUE, remove_slivers =
 }
 
 
+#' Load a ArcGIS FeatureLayer then make valid and clip
 load_arc_url <- function(url, crs = 3857, filter_geom = NULL, clip = NULL) {
+  if (is.null(url)) {
+    cli::cli_alert_warning(
+      "{.arg url} missing"
+    )
+
+    return(NULL)
+  }
+
   data <- arcgislayers::arc_read(
     url = url,
     crs = crs,
@@ -414,22 +423,43 @@ layer_usgs_pad <- function(data,
 }
 
 
+#' Plot a county basemap with water, roads, and parks
 plot_county_basemap <- function(
-    county,
-    divisions,
     water,
     roads,
     parks,
+    county = NULL,
+    divisions = NULL,
+    theme = ggplot2::theme_void(),
     crs = 3857) {
-  ggplot2::ggplot() +
-    geom_sf(
+
+  divisions_layer <- list()
+
+  if (!is.null(divisions)) {
+    divisions_layer <- ggplot2::geom_sf(
       data = rmapshaper::ms_innerlines(divisions),
       fill = NA,
       color = "gray70",
       linewidth = 0.22
-    ) +
+    )
+  }
+
+  county_layer <- list()
+
+  if (!is.null(county)) {
+    county_layer <- ggplot2::geom_sf(
+      data = county,
+      fill = NA,
+      color = "gray10",
+      linewidth = 0.4
+    )
+  }
+
+  ggplot2::ggplot() +
+    divisions_layer +
     layer_area_water(water) +
     layer_usgs_pad(parks) +
     layer_primary_secondary_roads(roads) +
-    ggplot2::theme_void()
+    county_layer +
+    theme
 }
