@@ -21,15 +21,16 @@ tar_option_set(
 
 options(
   tigris_use_cache = TRUE,
+  basemap.crs = 3857,
+
+  # to adapt this pipeline for a different metro area
   state.usps = "MD",
   county.name = "Baltimore city",
-  division.url = "https://services1.arcgis.com/mVFRs7NF4iFitgbY/arcgis/rest/services/Community_Statistical_Areas_(CSAs)__Reference_Boundaries/FeatureServer/0",
-  basemap.crs = 3857
+  division.url = "https://services1.arcgis.com/mVFRs7NF4iFitgbY/arcgis/rest/services/Community_Statistical_Areas_(CSAs)__Reference_Boundaries/FeatureServer/0"
+
 )
 
-# Run the R scripts in the R/ folder with your custom functions:
 tar_source()
-# tar_source("other_functions.R") # Source other scripts as needed.
 
 # Replace the target list below with your own:
 tar_plan(
@@ -123,12 +124,11 @@ tar_plan(
   county_basemap = plot_county_basemap(
     water = water_nhd,
     roads = roads,
-    county = county,
     parks = parks,
     divisions = divisions
   ),
   county_basemap_export = export_rds(
-    msa_basemap,
+    county_basemap,
     paste0(
       state_fips,
       county_fips,
