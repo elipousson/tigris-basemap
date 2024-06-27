@@ -21,8 +21,12 @@ ms_clip_ext <- function(target, clip = NULL, allow_null = TRUE, remove_slivers =
 
   clip <- sf::st_transform(clip, crs = sf::st_crs(target))
 
-  if (!inherits(clip, "sf")) {
-    clip <- sf::st_as_sf(clip)
+  if (any(!sf::st_is_valid(target))) {
+    target <- sf::st_make_valid(target)
+  }
+
+  if (any(!sf::st_is_valid(clip))) {
+    clip <- sf::st_make_valid(clip)
   }
 
   rmapshaper::ms_clip(target = target, clip = clip, remove_slivers = remove_slivers, ...)
@@ -173,7 +177,6 @@ filter_counties <- function(counties,
 #' @importFrom sf st_crs st_transform
 load_usgs_pad <- function(filter_geom = NULL,
                           ...,
-                          n_max = Inf,
                           clip = filter_geom,
                           keep = 0.025,
                           min_area = 20,
@@ -182,7 +185,6 @@ load_usgs_pad <- function(filter_geom = NULL,
   data <- arcgislayers::arc_read(
     # FIXME: Add support for multiple PAD layers or swap this function for a dedicated PAD data package
     url = "https://services.arcgis.com/v01gqwM5QqNysAAi/ArcGIS/rest/services/Manager_Name/FeatureServer/0",
-    n_max = n_max,
     filter_geom = filter_geom,
     crs = crs
   )
@@ -192,13 +194,13 @@ load_usgs_pad <- function(filter_geom = NULL,
     data <- data |>
       dplyr::mutate(
         area = units::set_units(
-          sf::st_area(geometry),
+          sf::st_area(.data[["geometry"]]),
           area_units,
           mode = "standard"
         )
       ) |>
       dplyr::filter(
-        as.numeric(area) >= min_area
+        as.numeric(.data[["area"]]) >= min_area
       )
   }
 
@@ -248,7 +250,15 @@ load_primary_secondary_roads <- function(state,
       dplyr::filter(RTTYP %in% road_type)
   }
 
-  format_basemap_data(roads, clip = clip, crs = crs, dissolve = dissolve, simplify = simplify, smooth = smooth, ...)
+  format_basemap_data(
+    roads,
+    clip = clip,
+    crs = crs,
+    dissolve = dissolve,
+    simplify = simplify,
+    smooth = smooth,
+    ...
+  )
 }
 
 layer_primary_secondary_roads <- function(
@@ -284,7 +294,7 @@ load_usgs_nhd <- function(
     filter_geom = NULL,
     where = NULL,
     ...,
-    keep = 0.06,
+    keep = 0.07,
     method = "chaikin",
     refinements = 1,
     clip = NULL,
@@ -511,7 +521,8 @@ layer_area_water <- function(water,
   )
 }
 
-#' Create a ggplot2 layer with `ggplot2::geom_sf` using protected area/park aesthetics
+#' Create a ggplot2 layer with `ggplot2::geom_sf` using protected area/park
+#' aesthetics
 layer_usgs_pad <- function(data,
                            fill = "#b9d3ba",
                            color = NA,
