@@ -20,12 +20,21 @@ ms_clip_ext <- function(target, clip = NULL, allow_null = TRUE, remove_slivers =
   }
 
   clip <- sf::st_transform(clip, crs = sf::st_crs(target))
+
+  if (!inherits(clip, "sf")) {
+    clip <- sf::st_as_sf(clip)
+  }
+
   rmapshaper::ms_clip(target = target, clip = clip, remove_slivers = remove_slivers, ...)
 }
 
 
 #' Load a ArcGIS FeatureLayer then make valid and clip
-load_arc_url <- function(url, crs = 3857, filter_geom = NULL, clip = NULL) {
+load_arc_url <- function(url, crs = 3857,
+                         filter_geom = NULL,
+                         clip = NULL,
+                         promote_to_multi = TRUE,
+                         remove_slivers = TRUE) {
   if (is.null(url)) {
     cli::cli_alert_warning(
       "{.arg url} missing"
@@ -40,15 +49,31 @@ load_arc_url <- function(url, crs = 3857, filter_geom = NULL, clip = NULL) {
     filter_geom = filter_geom
   )
 
-  data <- sf::st_make_valid(data)
+  poly_geom <- sf::st_is(data, "POLYGON")
+
+  if (any(poly_geom)) {
+    data <- sf::st_make_valid(data)
+
+    data[poly_geom, ] <- sf::st_cast(
+      data[poly_geom, ],
+      to = "MULTIPOLYGON"
+    )
+  }
+
+  # data <- sf::st_make_valid(data)
 
   ms_clip_ext(
     target = data,
-    clip = clip
+    clip = clip,
+    remove_slivers = remove_slivers
   )
 }
 
-filter_clip <- function(target, clip, remove_slivers = TRUE, threshold = 0.1, keep = TRUE) {
+filter_clip <- function(target,
+                        clip,
+                        remove_slivers = TRUE,
+                        threshold = 0.1,
+                        keep = TRUE) {
   clipped_target <- target |>
     dplyr::mutate(
       geometry_area = sf::st_area(.data[[attr(target, "sf_column")]])
@@ -72,12 +97,13 @@ filter_clip <- function(target, clip, remove_slivers = TRUE, threshold = 0.1, ke
     )
 }
 
-#' Use multiple `{rmapshaper}` and `{smoothr}` functions to format spatial data for use in a basemap
+#' Use multiple `{rmapshaper}` and `{smoothr}` functions to format spatial data
+#' for use in a basemap
 #' FIXME: Add missing imports
 format_basemap_data <- function(data,
-                                dissolve = TRUE,
-                                simplify = TRUE,
-                                smooth = TRUE,
+                                dissolve = FALSE,
+                                simplify = FALSE,
+                                smooth = FALSE,
                                 ...,
                                 keep = 0.02,
                                 method = "chaikin",
@@ -117,11 +143,16 @@ export_rds <- function(obj,
   )
 }
 
-#' Filter a data frame of counties using the internal `validate_county` `{tigris}` function
+#' Filter a data frame of counties using the internal `validate_county`
+#' `{tigris}` function
 #'
 #' @importFrom rmapshaper ms_clip
 #' @importFrom sf st_crs st_transform
-filter_counties <- function(counties, state = NULL, county = NULL, multiple = TRUE, validate = TRUE) {
+filter_counties <- function(counties,
+                            state = NULL,
+                            county = NULL,
+                            multiple = TRUE,
+                            validate = TRUE) {
   if (is.null(county)) {
     return(counties)
   }
@@ -140,7 +171,14 @@ filter_counties <- function(counties, state = NULL, county = NULL, multiple = TR
 #' @inheritParams format_basemap_data
 #' @importFrom rmapshaper ms_clip
 #' @importFrom sf st_crs st_transform
-load_usgs_pad <- function(filter_geom = NULL, ..., n_max = 1e+10, clip = filter_geom, keep = 0.01, crs = 3857) {
+load_usgs_pad <- function(filter_geom = NULL,
+                          ...,
+                          n_max = Inf,
+                          clip = filter_geom,
+                          keep = 0.025,
+                          min_area = 20,
+                          area_units = "acres",
+                          crs = 3857) {
   data <- arcgislayers::arc_read(
     # FIXME: Add support for multiple PAD layers or swap this function for a dedicated PAD data package
     url = "https://services.arcgis.com/v01gqwM5QqNysAAi/ArcGIS/rest/services/Manager_Name/FeatureServer/0",
@@ -149,13 +187,36 @@ load_usgs_pad <- function(filter_geom = NULL, ..., n_max = 1e+10, clip = filter_
     crs = crs
   )
 
+  # Filter by minimum area
+  if (is.numeric(min_area)) {
+    data <- data |>
+      dplyr::mutate(
+        area = units::set_units(
+          sf::st_area(geometry),
+          area_units,
+          mode = "standard"
+        )
+      ) |>
+      dplyr::filter(
+        as.numeric(area) >= min_area
+      )
+  }
+
   format_basemap_data(data, keep = keep, clip = clip, crs = NULL, ...)
 }
 
 #' Load a county or counties using `tigris::counties`
 #' @importFrom tigris counties
 #' @importFrom package function
-load_county <- function(state, counties = NULL, county = NULL, ..., validate = TRUE, multiple = TRUE, simplify = TRUE, keep = 0.075, crs = 3857) {
+load_county <- function(state,
+                        counties = NULL,
+                        county = NULL,
+                        ...,
+                        validate = TRUE,
+                        multiple = TRUE,
+                        simplify = TRUE,
+                        keep = 0.075,
+                        crs = 3857) {
   counties <- counties %||% tigris::counties(state = state, ...)
 
   county <- filter_counties(counties, state = state, county = county, validate = validate)
@@ -166,8 +227,16 @@ load_county <- function(state, counties = NULL, county = NULL, ..., validate = T
 #' Load
 #' @importFrom tigris primary_secondary_roads
 #' @importFrom dplyr filter
-load_primary_secondary_roads <- function(state, year = NULL, filter_by = NULL, ...,
-                                         dissolve = FALSE, simplify = FALSE, smooth = FALSE, clip = NULL, road_type = c("I", "U"), crs = 3857) {
+load_primary_secondary_roads <- function(state,
+                                         year = NULL,
+                                         filter_by = NULL,
+                                         ...,
+                                         dissolve = FALSE,
+                                         simplify = FALSE,
+                                         smooth = FALSE,
+                                         clip = NULL,
+                                         road_type = c("I", "U"),
+                                         crs = 3857) {
   roads <- tigris::primary_secondary_roads(
     state = state,
     year = year,
@@ -213,7 +282,7 @@ load_usgs_nhd <- function(
     url = "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/12",
     # url = "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/10",
     filter_geom = NULL,
-    n_max = Inf,
+    where = NULL,
     ...,
     keep = 0.06,
     method = "chaikin",
@@ -223,11 +292,12 @@ load_usgs_nhd <- function(
   nhd <- arcgislayers::arc_read(
     url = url,
     filter_geom = filter_geom,
-    n_max = n_max,
+    where = where,
     crs = crs
   )
 
-  # FIXME: Standardize what parameters are or are not being passed to `format_basemap_data`
+  # FIXME: Standardize what parameters are or are not being passed to
+  # `format_basemap_data`
   format_basemap_data(
     nhd,
     keep = keep,
@@ -246,7 +316,8 @@ load_area_water <- function(state,
                             keep = 0.004,
                             method = "chaikin",
                             refinements = 1,
-                            clip = NULL, crs = 3857) {
+                            clip = NULL,
+                            crs = 3857) {
   if (length(county) > 1) {
     water <- lapply(
       county,
@@ -266,6 +337,7 @@ load_area_water <- function(state,
     method = method,
     refinements = refinements,
     clip = clip,
+    smooth = FALSE,
     crs = crs,
     ...
   )
@@ -275,7 +347,6 @@ load_area_water <- function(state,
 make_county_buffers <- function(county,
                                 dist = c(10, 20, 30, 40, 50),
                                 unit = "mi") {
-
   # FIXME: dist could or should be set based on the county geometry
   # TODO: Move [sfext::sf_bbox_diagdist()] into a standalone script and then
   # import into this repository
@@ -305,6 +376,7 @@ plot_msa_basemap <- function(
     roads,
     parks,
     bg,
+    rail_lines = NULL,
     county = NULL,
     line_dist = 100,
     crs = 3857) {
@@ -324,10 +396,14 @@ plot_msa_basemap <- function(
     )
 
   county_lines <- counties |>
-    rmapshaper::ms_lines() |>
-    rmapshaper::ms_erase(county) |>
-    sfext::st_buffer_ext(dist = line_dist)
-
+    sf::st_combine() |>
+    rmapshaper::ms_innerlines() |>
+    rmapshaper::ms_erase(county, remove_slivers = TRUE) |>
+    rmapshaper::ms_erase(
+      sf::st_buffer(water, dist = line_dist * 3),
+      remove_slivers = TRUE
+    ) #|>
+  # sfext::st_buffer_ext(dist = line_dist)
 
   ggplot2::ggplot() +
     ggplot2::geom_sf(
@@ -353,21 +429,43 @@ plot_msa_basemap <- function(
       linewidth = 0.2
     ) +
     geom_sf(
-      data = rmapshaper::ms_erase(urban_area, water),
+      data = rmapshaper::ms_erase(
+        urban_area,
+        water,
+        remove_slivers = TRUE
+      ),
       fill = "gray80",
       color = NA,
-      alpha = 0.15
+      alpha = 0.1
     ) +
-    layer_area_water(water) +
-    layer_usgs_pad(parks) +
-    layer_primary_secondary_roads(roads) +
     list(
       ggplot2::geom_sf(
-        data = counties,
-        linewidth = 0.2,
+        # data = county_lines,
+        data = rmapshaper::ms_erase(
+          sf::st_union(
+            county_lines
+          ) |>
+            sf::st_as_sf(),
+          sf::st_union(
+            sf::st_buffer(water, dist = 2000)
+          ) |>
+            sf::st_as_sf(),
+          remove_slivers = TRUE
+        ),
+        linewidth = 0.15,
         color = "gray45",
         fill = NA
       ),
+      layer_area_water(water),
+      layer_usgs_pad(parks),
+      ggplot2::geom_sf(
+        data = rail_lines,
+        linewidth = 0.28,
+        linetype = "dotdash",
+        color = "gray25",
+        alpha = 0.7,
+      ),
+      layer_primary_secondary_roads(roads),
       ggplot2::geom_sf(
         data = county,
         linewidth = 0.4,
@@ -396,10 +494,15 @@ load_urban_area <- function(county,
 
 #' Create a ggplot2 layer with `ggplot2::geom_sf` using area water aesthetics
 layer_area_water <- function(water,
+                             dist = NULL,
                              color = NA,
                              fill = "#66B7C9",
                              alpha = 1,
                              ...) {
+  if (!is.null(dist)) {
+    water <- sf::st_buffer(water, dist = dist, ...)
+  }
+
   ggplot2::geom_sf(
     data = water,
     color = color,
@@ -432,12 +535,15 @@ plot_county_basemap <- function(
     divisions = NULL,
     theme = ggplot2::theme_void(),
     crs = 3857) {
-
   divisions_layer <- list()
 
   if (!is.null(divisions)) {
+    divisions_simple <- divisions |>
+      rmapshaper::ms_simplify(keep = 0.25, keep_shapes = TRUE) # |>
+    # rmapshaper::ms_innerlines()
+
     divisions_layer <- ggplot2::geom_sf(
-      data = rmapshaper::ms_innerlines(divisions),
+      data = divisions_simple,
       fill = NA,
       color = "gray70",
       linewidth = 0.22
@@ -462,4 +568,67 @@ plot_county_basemap <- function(
     layer_primary_secondary_roads(roads) +
     county_layer +
     theme
+}
+
+
+join_division_tracts <- function(
+    divisions,
+    crs = 3857,
+    state_fips = NULL,
+    county_fips = NULL,
+    largest = TRUE,
+    make_divisions_valid = TRUE,
+    geos_method = "valid_linework",
+    division_type = NULL,
+    keep = 0.3,
+    division_col = "name",
+    make_inner_lines = TRUE) {
+  if (make_divisions_valid) {
+    divisions_geom <- divisions |>
+      sf::st_geometry() |>
+      sf::st_make_valid(geos_method = geos_method)
+
+    sf::st_geometry(divisions) <- divisions_geom
+  }
+
+  if (!inherits(divisions, "sf")) {
+    divisions <- sf::st_as_sf(divisions)
+  }
+
+  division_type <- division_type %||%
+    tigris::tracts(state = state_fips, county = county_fips) |>
+    sf::st_transform(crs = crs)
+
+  divisions <- join_county_tracts(
+    divisions,
+    county_tracts = division_type,
+    col = division_col,
+    keep = keep
+  )
+
+  if (!make_inner_lines) {
+    return(divisions)
+  }
+
+  divisions |>
+    rmapshaper::ms_innerlines()
+}
+
+#' Join data to tracts
+join_county_tracts <- function(data,
+                               county_tracts,
+                               largest = TRUE,
+                               col = "name",
+                               keep = 0.065) {
+  county_tracts |>
+    sf::st_join(
+      data,
+      largest = largest
+    ) |>
+    summarise(
+      geometry = sf::st_union(sf::st_combine(geometry)),
+      .by = dplyr::all_of(col)
+    ) |>
+    sf::st_make_valid() |>
+    rmapshaper::ms_simplify(keep = keep)
 }
