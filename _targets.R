@@ -98,7 +98,9 @@ prep_county_features <- tar_plan(
   ),
   water_nhd = load_usgs_nhd(
     filter_geom = sf::st_bbox(county),
-    clip = county
+    clip = county,
+    smooth = FALSE,
+    simplify = TRUE
   ),
   water_nhd_lines = load_usgs_nhd(
     url = "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/6",
@@ -132,8 +134,11 @@ prep_msa_features <- tar_plan(
     filter_by = msa,
     clip = msa_counties_full
   ),
+  msa_filter_geom = msa |>
+    sf::st_union(is_coverage = TRUE) |>
+    sf::st_geometry(),
   msa_parks = load_usgs_pad(
-    filter_geom = sf::st_geometry(sf::st_union(msa, is_coverage = TRUE)),
+    filter_geom = msa_filter_geom,
     min_area = 40,
     crs = getOption("basemap.crs")
   ),
