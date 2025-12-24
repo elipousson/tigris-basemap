@@ -14,6 +14,8 @@ tar_option_set(
 
 options(
   tigris_use_cache = TRUE,
+  # TODO: Implement tigris year option
+  tigris_year = 2023,
   basemap.crs = 3857,
 
   # to adapt this pipeline for a different metro area
@@ -136,7 +138,9 @@ prep_msa_features <- tar_plan(
   ),
   msa_filter_geom = msa |>
     sf::st_union(is_coverage = TRUE) |>
-    sf::st_geometry(),
+    sf::st_geometry() |>
+    sf::st_concave_hull(0.1, allow_holes = FALSE) |>
+    sf::st_union(sf::st_union(msa)),
   msa_parks = load_usgs_pad(
     filter_geom = msa_filter_geom,
     min_area = 40,
@@ -193,6 +197,14 @@ tigris_basemap_plan <- tar_plan(
     county = county,
     parks = msa_parks,
     bg = county_buffers[5, ]
+  ),
+  county_buffers_export = export_rds(
+    county_buffers,
+    paste0(
+      state_fips,
+      county_fips,
+      "_county_buffers.rds"
+    )
   ),
   msa_basemap_export = export_rds(
     msa_basemap,
