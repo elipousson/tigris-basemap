@@ -139,6 +139,10 @@ format_basemap_data <- function(data,
 
 export_rds <- function(obj,
                        filename) {
+  if(!fs::dir_exists("output")) {
+    fs::dir_create("output")
+  }
+
   readr::write_rds(
     obj,
     fs::path(
@@ -458,6 +462,7 @@ plot_msa_basemap <- function(
           ) |>
             sf::st_as_sf(),
           sf::st_union(
+            # TODO: Make the buffer distance conditional based on area dimensions
             sf::st_buffer(water, dist = 2000)
           ) |>
             sf::st_as_sf(),
@@ -467,8 +472,8 @@ plot_msa_basemap <- function(
         color = "gray45",
         fill = NA
       ),
-      layer_area_water(water),
       layer_usgs_pad(parks),
+      layer_area_water(water),
       ggplot2::geom_sf(
         data = rail_lines,
         linewidth = 0.28,
