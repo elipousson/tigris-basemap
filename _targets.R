@@ -28,15 +28,15 @@ tar_source()
 
 prep_tigris_admin <- tar_plan(
   # FIXME: Allow handling of multiple states
-  state_fips = tigris:::validate_state(getOption("state.usps")),
+  state_fips = tigris:::validate_state(
+    state = getOption("state.usps")
+  ),
   county_fips = tigris:::validate_county(
     state = state_fips,
     county = getOption("county.name")
   ),
-  state = dplyr::filter(
-    tigris::states(),
-    STATEFP == state_fips
-  ),
+  us_states = tigris::states(),
+  state = dplyr::filter(us_states, STATEFP == state_fips),
   counties = load_county(state = state_fips),
   county = load_county(
     counties = counties,
@@ -48,9 +48,12 @@ prep_tigris_admin <- tar_plan(
     metro_divisions(filter_by = state),
     crs = getOption("basemap.crs")
   ),
-  rail_lines = rails(
-    filter_by = state,
-    crs = getOption("basemap.crs")
+  targets::tar_target(
+    rail_lines,
+    tigris::rails(
+      filter_by = state
+    ) |>
+      sf::st_transform(getOption("basemap.crs"))
   ),
   us_msa = sf::st_transform(
     tidycensus::get_acs(
@@ -121,7 +124,8 @@ prep_county_features <- tar_plan(
   roads = load_primary_secondary_roads(
     state = state_fips,
     filter_by = county,
-    clip = county
+    clip = county,
+    road_type = c("I", "U")
   )
 )
 
@@ -129,12 +133,18 @@ prep_msa_features <- tar_plan(
   msa_water = load_area_water(
     state = state_fips,
     county = msa_counties[["COUNTYFP"]],
-    clip = msa_counties_full
+    clip = msa_counties_full,
+    simplify = TRUE,
+    keep = 0.02,
+    smooth = TRUE
   ),
   msa_roads = load_primary_secondary_roads(
     state = state_fips,
     filter_by = msa,
-    clip = msa_counties_full
+    clip = msa_counties_full,
+    road_type = c("I", "U"),
+    simplify = TRUE,
+    keep = 0.03
   ),
   msa_filter_geom = msa |>
     sf::st_union(is_coverage = TRUE) |>
@@ -144,6 +154,7 @@ prep_msa_features <- tar_plan(
   msa_parks = load_usgs_pad(
     filter_geom = msa_filter_geom,
     min_area = 40,
+    simplify = TRUE,
     crs = getOption("basemap.crs")
   ),
   msa_urban_area = rmapshaper::ms_erase(
@@ -177,8 +188,8 @@ tigris_basemap_plan <- tar_plan(
   county_basemap = plot_county_basemap(
     water = water_nhd,
     roads = roads,
-    parks = parks,
-    divisions = divisions
+    parks = parks # ,
+    # divisions = divisions
   ),
   county_basemap_export = export_rds(
     county_basemap,
@@ -212,6 +223,22 @@ tigris_basemap_plan <- tar_plan(
       state_fips,
       county_fips,
       "_msa_basemap.rds"
+    )
+  ),
+  county_export = export_rds(
+    county,
+    paste0(
+      state_fips,
+      county_fips,
+      "_county.rds"
+    )
+  ),
+  msa_counties_export = export_rds(
+    msa_counties,
+    paste0(
+      state_fips,
+      county_fips,
+      "_msa_counties.rds"
     )
   )
 )
