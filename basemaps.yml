@@ -1,102 +1,367 @@
 # Basemap specifications for the tigris-basemap pipeline.
 #
-# Each entry under `basemaps` defines the layers for one type of basemap. Each
-# layer uses a source from sources.yml and can override the source `defaults`
-# with `process` values for that basemap.
+# Each entry under `basemaps` defines the data, view, and style layers for one
+# type of basemap. Style layers follow the MapLibre Style Spec
+# (https://maplibre.org/maplibre-style-spec/layers/) with the additions
+# described in docs/style-spec.md.
 #
 # Fields:
 #   description: Description of the basemap (optional).
-#   layers:      Layers used by the basemap (required).
-#   staging:     Layers that are loaded by the pipeline but not yet used by the
+#   data:        Named data loaded for the basemap (required). Each entry has a
+#                `source` from sources.yml, an optional `description`, optional
+#                `args` that override the loader arguments for the source (e.g.
+#                a `where` clause), and optional `processing_steps`. Data
+#                processing steps run when the data is loaded, after any
+#                processing steps for the source, and can reference the data
+#                available to the target loading the data:
+#                  - county basemap data: county
+#                  - MSA water, roads, and parks: msa, msa_counties, and
+#                    msa_hull
+#                  - MSA urban_area: msa
+#   staging:     Data that is loaded by the pipeline but not yet used by the
 #                basemap, e.g. potential layers that are still being designed
-#                (optional). Uses the same fields as `layers`.
+#                (optional). Uses the same fields as `data`.
+#   view:        Map extent and frame (optional):
+#     bounds:      A [west, south, east, north] array in longitude and latitude
+#                  or a reference to data, e.g. `{source: county}`, with
+#                  optional `processing_steps`.
+#     neatline:    If true, draw a frame at the bounds.
+#     theme:       ggplot2 theme: void (default), minimal, bw, classic, or light.
+#   layers:      Style layers in draw order (required). Each layer has an `id`,
+#                `type` (fill, line, circle, or background), `source` (a name
+#                from `data` or data provided by the pipeline: county, counties,
+#                msa, buffer, or divisions), optional `processing_steps`,
+#                `layout`, and `paint`.
 #
-# Layer fields:
-#   source:      Identifier for a source in sources.yml (required).
-#   description: Description of how the layer is used (optional).
-#   process:     Arguments passed to the loader function (and on to
-#                format_basemap_data()) that override the source defaults
-#                (optional). Do not set `clip`, `filter_geom`, `filter_by`, or
-#                `crs` here as these are set by the pipeline.
+# Processing steps are written as a list of steps with a `name` and optional
+# `args`. Arguments can reference other data with `{source: <name>}`. See
+# docs/style-spec.md for the supported steps, properties, and units.
+#
+# Reusable steps are defined with YAML anchors (`&name`) under `definitions`
+# and inserted with aliases (`*name`). Merge keys (`<<`) are not supported.
+
+definitions:
+  clip_county: &clip_county
+    name: ms_clip
+    args:
+      clip:
+        source: county
+      remove_slivers: true
+  clip_msa_counties: &clip_msa_counties
+    name: ms_clip
+    args:
+      clip:
+        source: msa_counties
+      remove_slivers: true
+  # Clips the full MSA counties to the MSA boundary, which follows the shoreline
+  clip_msa: &clip_msa
+    name: ms_clip
+    args:
+      clip:
+        source: msa
+      remove_slivers: true
 
 basemaps:
   county:
     description: >-
       County basemap without an outside border, intended for use with a data
       layer and the county boundary as a foreground layer.
-    layers:
+    data:
       water:
         source: usgs_nhd_waterbody
         description: NHD waterbodies clipped to the focal county.
-        process:
-          simplify: true
-          smooth: false
+        processing_steps:
+          - *clip_county
       roads:
         source: tigris_primary_secondary_roads
         description: Interstates and U.S. highways clipped to the focal county.
-        process:
-          road_type: [I, U]
+        processing_steps:
+          - name: filter
+            args:
+              expression: ["in", ["get", "RTTYP"], ["literal", ["I", "U"]]]
+          - *clip_county
       parks:
         source: usgs_pad
-        description: Protected areas within the focal county.
-        process:
-          min_area: 25
-          smooth: false
+        description: Protected areas of 25 acres or more within the focal county.
+        args:
+          where: GIS_Acres >= 25
+        processing_steps:
+          - *clip_county
     staging:
       area_water:
         source: tigris_area_water
         description: >-
           Census area water clipped to the focal county (an alternative to NHD
           waterbodies).
+        processing_steps:
+          - *clip_county
       water_lines:
         source: usgs_nhd_flowline
         description: NHD flowlines clipped to the focal county.
-        process:
-          dissolve: false
-          smooth: false
-          # where: "FCODE='46006'"
+        processing_steps:
+          - *clip_county
+    view:
+      bounds:
+        source: county
+      neatline: false
+      theme: void
+    layers:
+      - id: divisions
+        type: line
+        source: divisions
+        processing_steps:
+          - name: ms_simplify
+            args:
+              keep: 0.25
+              keep_shapes: true
+        layout:
+          visibility: none
+        paint:
+          line-color: "#B3B3B3"
+          line-width: 0.63
+      - id: water
+        type: fill
+        source: water
+        processing_steps:
+          - name: ms_simplify
+            args:
+              keep: 0.07
+          - name: st_union
+        paint:
+          fill-color: "#66B7C9"
+      - id: parks
+        type: fill
+        source: parks
+        paint:
+          fill-color: "#B9D3BA"
+          fill-opacity: 0.6
+      - id: roads-interstate
+        type: line
+        source: roads
+        processing_steps:
+          - name: filter
+            args:
+              expression: ["==", ["get", "RTTYP"], "I"]
+        paint:
+          line-color: "#333333"
+          line-width: 0.85
+          line-opacity: 0.7
+      - id: roads-us-highway
+        type: line
+        source: roads
+        processing_steps:
+          - name: filter
+            args:
+              expression: ["==", ["get", "RTTYP"], "U"]
+        paint:
+          line-color: "#404040"
+          line-width: 0.74
+          line-opacity: 0.7
 
   msa:
     description: >-
       Regional basemap for the MSA with the focal county highlighted and a
       circular buffer around the focal county as a background.
-    layers:
+    data:
       water:
         source: tigris_area_water
-        description: Census area water for all counties in the MSA.
-        process:
-          simplify: true
-          keep: 0.02
-          smooth: true
+        description: >-
+          Census area water for all counties in the MSA clipped to the full
+          (unclipped) MSA counties.
+        processing_steps:
+          - *clip_msa_counties
       roads:
         source: tigris_primary_secondary_roads
-        description: Interstates and U.S. highways within the MSA.
-        process:
-          road_type: [I, U]
-          simplify: true
-          keep: 0.03
+        description: >-
+          Interstates and U.S. highways within the MSA clipped to the full
+          (unclipped) MSA counties.
+        processing_steps:
+          - name: filter
+            args:
+              expression: ["in", ["get", "RTTYP"], ["literal", ["I", "U"]]]
+          - *clip_msa_counties
       parks:
         source: usgs_pad
         description: >-
-          Protected areas within a concave hull around the MSA.
-        process:
-          min_area: 40
-          simplify: true
+          Protected areas of 40 acres or more within a concave hull around the
+          MSA.
+        args:
+          where: GIS_Acres >= 40
+        processing_steps:
+          - name: ms_clip
+            args:
+              clip:
+                source: msa_hull
+              remove_slivers: true
       urban_area:
         source: tigris_urban_areas
         description: Urban areas intersecting the focal county clipped to the MSA.
-    staging:
-      urban_area_land:
-        source: tigris_urban_areas
-        description: Urban areas with MSA water erased.
+        processing_steps:
+          - name: ms_clip
+            args:
+              clip:
+                source: msa
+              remove_slivers: true
       rail_lines:
         source: tigris_rails
-        description: >-
-          Rail lines for the state (supported by plot_msa_basemap() but not
-          currently used).
+        description: Rail lines for the state.
+    staging:
       metro_areas:
         source: tigris_metro_divisions
         description: Metropolitan divisions for the state.
       combined_area:
         source: tigris_combined_statistical_areas
         description: Combined statistical area including the focal county.
+    view:
+      bounds:
+        # The MSA has the same extent as the MSA counties clipped to the MSA
+        source: [msa, buffer, water]
+      neatline: false
+      theme: void
+    layers:
+      - id: background
+        type: fill
+        source: buffer
+        paint:
+          fill-color: "#FAFAFA"
+      - id: background-outline
+        type: line
+        source: buffer
+        paint:
+          line-color: "#737373"
+          line-width: 0.57
+      - id: counties-halo
+        type: line
+        source: counties
+        processing_steps:
+          - *clip_msa
+        paint:
+          line-color: "#FFFFFF"
+          line-width: 5.69
+          line-opacity: 0.8
+      - id: counties
+        type: fill
+        source: counties
+        processing_steps:
+          - *clip_msa
+        paint:
+          fill-color: "#FFFFFF"
+      - id: counties-outline
+        type: line
+        source: counties
+        processing_steps:
+          - *clip_msa
+        paint:
+          line-color: "#000000"
+          line-width: 0.57
+      - id: urban-area
+        type: fill
+        source: urban_area
+        processing_steps:
+          - name: ms_erase
+            args:
+              erase:
+                source: water
+              remove_slivers: true
+        paint:
+          fill-color: "#F2F2F2"
+          fill-opacity: 0.1
+      - id: county-lines
+        type: line
+        source: counties
+        processing_steps:
+          - *clip_msa
+          # Erasing the focal county first removes its borders from the inner
+          # lines between counties
+          - name: ms_erase
+            args:
+              erase:
+                source: county
+              remove_slivers: true
+          - name: ms_innerlines
+          - name: ms_erase
+            args:
+              erase:
+                source: water
+                processing_steps:
+                  # TODO: Make the buffer distance conditional based on area
+                  # dimensions
+                  - name: st_buffer
+                    args:
+                      dist: 2000
+                  - name: st_union
+              remove_slivers: true
+        paint:
+          line-color: "#737373"
+          line-width: 0.43
+      - id: parks
+        type: fill
+        source: parks
+        processing_steps:
+          - name: ms_simplify
+            args:
+              keep: 0.025
+        paint:
+          fill-color: "#B9D3BA"
+          fill-opacity: 0.84
+      - id: rail
+        type: line
+        source: rail_lines
+        layout:
+          visibility: none
+        paint:
+          line-color: "#404040"
+          line-width: 0.8
+          line-opacity: 0.7
+          line-dasharray: [1, 3, 4, 3]
+      - id: county-outline
+        type: line
+        source: county
+        paint:
+          line-color: "#666666"
+          line-width: 1.14
+      - id: water
+        type: fill
+        source: water
+        processing_steps:
+          - name: ms_simplify
+            args:
+              keep: 0.02
+          - name: smooth
+            args:
+              method: chaikin
+              refinements: 1
+          - name: st_buffer
+            args:
+              dist: 100
+          - name: st_union
+        paint:
+          fill-color: "#66B7C9"
+      - id: roads-interstate
+        type: line
+        source: roads
+        processing_steps:
+          - name: filter
+            args:
+              expression: ["==", ["get", "RTTYP"], "I"]
+          - name: ms_simplify
+            args:
+              keep: 0.03
+        paint:
+          line-color: "#333333"
+          line-width: 0.85
+          line-opacity: 0.91
+      - id: roads-us-highway
+        type: line
+        source: roads
+        processing_steps:
+          - name: filter
+            args:
+              expression: ["==", ["get", "RTTYP"], "U"]
+          - name: ms_simplify
+            args:
+              keep: 0.03
+        paint:
+          line-color: "#404040"
+          line-width: 0.74
+          line-opacity: 0.91

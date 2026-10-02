@@ -5,8 +5,8 @@
 # and must use only lowercase letters, numbers, and underscores.
 #
 # Data shared between geographies is only loaded once: national data for each
-# `tigris_year`, state data for each `state` and `tigris_year`, and MSA data for
-# each `msa` and `tigris_year`.
+# `tigris_year`, state data for each state and `tigris_year` (including every
+# state in each MSA), and MSA data for each `msa` and `tigris_year`.
 #
 # Fields:
 #   name:         Display name for the geography (required).
@@ -15,9 +15,14 @@
 #   state:        State USPS abbreviation, name, or FIPS code (required).
 #   county:       Focal county name or FIPS code within `state` (required).
 #   msa:          ACS name of the metropolitan statistical area that includes
-#                 the focal county (required). All states included in the MSA
-#                 must be listed in `state`. Multi-state MSAs are not yet
-#                 supported.
+#                 the focal county (required).
+#   msa_states:   States included in the MSA as USPS abbreviations, names, or
+#                 FIPS codes (optional). If omitted, the states are parsed from
+#                 the MSA name (e.g. DC, VA, MD, and WV for "Washington-
+#                 Arlington-Alexandria, DC-VA-MD-WV Metro Area"). If provided,
+#                 the states must match the MSA name. Required if the states
+#                 can't be parsed from the name. `state` must be one of the MSA
+#                 states.
 #   division:     Sub-county divisions (optional) with the fields:
 #     type:           One of `tract`, `zcta`, or `custom` (required).
 #     path:           File readable by sf::read_sf() (custom only).
@@ -26,6 +31,12 @@
 #     name_col:       Column identifying custom divisions (custom only).
 #     snap_to_tracts: If true, rebuild custom divisions from census tracts
 #                     (custom only, requires `name_col`).
+#     processing_steps:
+#                     Processing steps run after the divisions are loaded and
+#                     before they are snapped to tracts (optional), e.g.
+#                     `st_make_valid` to repair invalid geometry or `ms_clip`
+#                     with `{source: county}` to clip ZCTAs or custom divisions
+#                     to the county. See docs/style-spec.md.
 
 geographies:
   baltimore_city:
@@ -43,3 +54,27 @@ geographies:
       url: https://services1.arcgis.com/mVFRs7NF4iFitgbY/arcgis/rest/services/Community_Statistical_Areas_(CSAs)__Reference_Boundaries/FeatureServer/0
       name_col: Community
       snap_to_tracts: true
+      processing_steps:
+        # Two CSAs have invalid geometry that causes snapping to tracts to fail
+        - name: st_make_valid
+
+  el_paso:
+    name: El Paso County
+    description: >-
+      County and regional basemaps for El Paso County, Texas and the El Paso,
+      TX Metro Area.
+    tigris_year: 2023
+    state: TX
+    county: El Paso County
+    msa: El Paso, TX Metro Area
+
+  washington_dc:
+    name: District of Columbia
+    description: >-
+      County and regional basemaps for the District of Columbia and the
+      Washington-Arlington-Alexandria, DC-VA-MD-WV Metro Area.
+    tigris_year: 2023
+    state: DC
+    county: District of Columbia
+    msa: Washington-Arlington-Alexandria, DC-VA-MD-WV Metro Area
+    msa_states: [DC, MD, VA, WV]

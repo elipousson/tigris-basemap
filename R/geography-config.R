@@ -1,12 +1,12 @@
 #' Read and validate geography specifications from a YAML file
 #'
 #' Each geography must include `name`, `tigris_year`, `state`, `county`, and
-#' `msa`. The states included in `msa` (based on the ACS name) must all be
-#' listed in `state`. Multi-state MSAs are not yet supported.
+#' `msa`. The states in the MSA are parsed from the ACS name or listed with the
+#' optional `msa_states` field. `state` must be one of the MSA states.
 #'
 #' @param path Path to a YAML file with a top-level `geographies` key.
-#' @returns A named list of geography specifications with `state` normalized to
-#'   a USPS abbreviation.
+#' @returns A named list of geography specifications with `state` and
+#'   `msa_states` normalized to USPS abbreviations.
 read_geographies <- function(path = "geographies.yml") {
   config <- yaml12::read_yaml(path)
   geographies <- config[["geographies"]]
@@ -58,31 +58,78 @@ validate_geography <- function(geography, id) {
   }
 
   geography$state <- state_to_usps(geography$state, id = id)
+  geography$msa_states <- validate_msa_states(geography, id = id)
 
-  msa_states <- msa_name_states(geography$msa)
-  unlisted_states <- setdiff(msa_states, geography$state)
-
-  if (length(unlisted_states) > 0) {
-    # TODO: Add support for multi-state MSAs
-    cli::cli_abort(
-      c(
-        "Geography {.val {id}} has an MSA that includes state{?s}
-        {.val {unlisted_states}} not listed in {.field state}.",
-        "i" = "Multi-state MSAs are not yet supported."
-      )
-    )
-  }
-
-  if (!geography$state %in% msa_states) {
+  if (!geography$state %in% geography$msa_states) {
     cli::cli_abort(
       "Geography {.val {id}} has a {.field state} ({.val {geography$state}})
-      that is not included in {.field msa} ({.val {geography$msa}})."
+      that is not one of the MSA states ({.val {geography$msa_states}})."
     )
   }
 
   geography$division <- validate_division(geography$division, id = id)
 
   geography
+}
+
+#' Get and validate the states included in a metropolitan statistical area
+#'
+#' States are parsed from the ACS name of the MSA (e.g. "DC-VA-MD-WV" in
+#' "Washington-Arlington-Alexandria, DC-VA-MD-WV Metro Area"). If
+#' `msa_states` is provided, it must match the parsed states. If the name can't
+#' be parsed (e.g. an older ACS vintage with a different format), `msa_states`
+#' is required and used on its own.
+#'
+#' @returns A character vector of USPS abbreviations.
+#' @noRd
+validate_msa_states <- function(geography, id) {
+  parsed <- tryCatch(msa_name_states(geography$msa), error = \(cnd) NULL)
+  listed <- geography$msa_states
+
+  if (is.null(listed)) {
+    if (is.null(parsed)) {
+      cli::cli_abort(
+        c(
+          "Geography {.val {id}} must provide {.field msa_states} because the
+          states can't be parsed from {.field msa}: {.val {geography$msa}}",
+          "i" = "ACS names usually look like
+          {.val Baltimore-Columbia-Towson, MD Metro Area}."
+        )
+      )
+    }
+
+    return(parsed)
+  }
+
+  listed <- unname(vapply(listed, \(x) state_to_usps(x, id = id), ""))
+
+  if (anyDuplicated(listed)) {
+    cli::cli_abort(
+      "Geography {.val {id}} {.field msa_states} has duplicate states:
+      {.val {listed[duplicated(listed)]}}"
+    )
+  }
+
+  if (is.null(parsed)) {
+    return(listed)
+  }
+
+  missing <- setdiff(parsed, listed)
+  extra <- setdiff(listed, parsed)
+
+  if (length(missing) > 0 || length(extra) > 0) {
+    cli::cli_abort(
+      c(
+        "Geography {.val {id}} {.field msa_states} doesn't match the states in
+        {.field msa} ({.val {parsed}}).",
+        "x" = if (length(missing) > 0) "Missing: {.val {missing}}",
+        "x" = if (length(extra) > 0) "Not in the MSA: {.val {extra}}"
+      )
+    )
+  }
+
+  # Use the order from the name so MSA keys are consistent
+  parsed
 }
 
 #' Convert a state USPS abbreviation, name, or FIPS code to a USPS abbreviation
@@ -180,19 +227,41 @@ validate_division <- function(division, id) {
     )
   }
 
+  check_processing_steps(
+    division$processing_steps,
+    id = paste0(id, ".division"),
+    available = "county"
+  )
+
   division
 }
 
 #' Create a short key for a metropolitan statistical area and year
 #'
 #' Keys use the first principal city, state abbreviations, and year, e.g.
-#' "baltimore_md_2023".
+#' "baltimore_md_2023" or "washington_dc_va_md_wv_2023".
 #' @noRd
-make_msa_key <- function(msa_name, tigris_year) {
+make_msa_key <- function(msa_name, msa_states, tigris_year) {
   city <- sub("[-,].*$", "", msa_name)
-  states <- sub("^.+, ([A-Z-]+) (Metro|Micro) Area$", "\\1", msa_name)
-  key <- tolower(paste(city, states, tigris_year, sep = "_"))
+  key <- tolower(paste(c(city, msa_states, tigris_year), collapse = "_"))
   gsub("[^a-z0-9]+", "_", key)
+}
+
+#' Create a call to `list()` with symbols for targets with a prefix and keys,
+#' e.g. `list(counties_dc_2023, counties_md_2023)`
+#'
+#' The call is created in a function (rather than in a `dplyr::mutate()` call)
+#' so `!!!` isn't evaluated by dplyr.
+#' @noRd
+make_ref_list <- function(prefix, keys) {
+  rlang::call2("list", !!!rlang::syms(paste0(prefix, keys)))
+}
+
+#' Convert USPS abbreviations to state FIPS codes
+#' @noRd
+usps_to_fips <- function(usps) {
+  states <- dplyr::distinct(tigris::fips_codes, state, state_code)
+  states$state_code[match(usps, states$state)]
 }
 
 #' Create a data frame of values for `tarchetypes::tar_map()`
@@ -209,6 +278,7 @@ make_geography_values <- function(geographies) {
     state_usps = vapply(geographies, \(x) x$state, ""),
     county_name = vapply(geographies, \(x) x$county, ""),
     msa_name = vapply(geographies, \(x) x$msa, ""),
+    msa_states = unname(lapply(geographies, \(x) x$msa_states)),
     division_type = vapply(
       geographies,
       \(x) x$division$type %||% NA_character_,
@@ -233,13 +303,17 @@ make_geography_values <- function(geographies) {
       geographies,
       \(x) isTRUE(x$division$snap_to_tracts),
       TRUE
-    )
+    ),
+    division_steps = unname(lapply(
+      geographies,
+      \(x) x$division$processing_steps
+    ))
   )
 
   values <- dplyr::mutate(
     values,
     state_key = paste(tolower(state_usps), tigris_year, sep = "_"),
-    msa_key = make_msa_key(msa_name, tigris_year)
+    msa_key = unlist(Map(make_msa_key, msa_name, msa_states, tigris_year))
   )
 
   msa_keys <- dplyr::distinct(values, msa_key, msa_name)
@@ -272,7 +346,8 @@ make_geography_values <- function(geographies) {
     msa_counties_ref = rlang::syms(paste0("msa_counties_", msa_key)),
     msa_water_ref = rlang::syms(paste0("msa_water_", msa_key)),
     msa_roads_ref = rlang::syms(paste0("msa_roads_", msa_key)),
-    msa_parks_ref = rlang::syms(paste0("msa_parks_", msa_key))
+    msa_parks_ref = rlang::syms(paste0("msa_parks_", msa_key)),
+    msa_rail_lines_ref = rlang::syms(paste0("msa_rail_lines_", msa_key))
   )
 }
 
@@ -283,34 +358,66 @@ make_year_values <- function(geography_values) {
 }
 
 #' Create values for state-level targets (one row per state and year)
+#'
+#' Includes the state of each focal county and every state in each MSA,
+#' de-duplicated so data for a state (e.g. Maryland for both the Baltimore and
+#' Washington, DC MSAs) is only loaded once for each year.
 #' @noRd
 make_state_values <- function(geography_values) {
+  msa_states <- dplyr::tibble(
+    state_usps = unlist(geography_values$msa_states),
+    tigris_year = rep(
+      geography_values$tigris_year,
+      lengths(geography_values$msa_states)
+    )
+  )
+
   geography_values |>
-    dplyr::distinct(state_key, state_usps, tigris_year) |>
+    dplyr::select(state_usps, tigris_year) |>
+    dplyr::bind_rows(msa_states) |>
+    dplyr::distinct() |>
     dplyr::mutate(
+      state_key = paste(tolower(state_usps), tigris_year, sep = "_"),
       us_states_ref = rlang::syms(paste0("us_states_", tigris_year))
     )
 }
 
 #' Create values for MSA-level targets (one row per MSA and year)
+#'
+#' Columns ending in `_refs` are calls to `list()` with the state-level targets
+#' for every state in the MSA.
 #' @noRd
 make_msa_values <- function(geography_values) {
-  geography_values |>
-    dplyr::distinct(
-      msa_key,
-      msa_name,
-      tigris_year,
-      state_key,
-      .keep_all = TRUE
-    ) |>
-    dplyr::select(
-      msa_key,
-      msa_name,
-      tigris_year,
-      us_msa_ref,
-      state_fips_ref,
-      counties_ref
-    )
+  msa_values <- dplyr::distinct(
+    geography_values,
+    msa_key,
+    msa_name,
+    tigris_year,
+    .keep_all = TRUE
+  )
+
+  state_keys <- Map(
+    \(states, year) paste(tolower(states), year, sep = "_"),
+    msa_values$msa_states,
+    msa_values$tigris_year
+  )
+
+  dplyr::tibble(
+    msa_key = msa_values$msa_key,
+    msa_name = msa_values$msa_name,
+    tigris_year = msa_values$tigris_year,
+    msa_state_fips = unname(lapply(msa_values$msa_states, usps_to_fips)),
+    us_msa_ref = msa_values$us_msa_ref,
+    counties_refs = unname(lapply(state_keys, \(x) make_ref_list("counties_", x))),
+    state_roads_refs = unname(lapply(
+      state_keys,
+      \(x) make_ref_list("state_roads_", x)
+    )),
+    rail_lines_refs = unname(lapply(
+      state_keys,
+      \(x) make_ref_list("rail_lines_", x)
+    ))
+  )
 }
 
 #' Filter metropolitan statistical areas by name
@@ -332,22 +439,101 @@ filter_msa <- function(msa_data, msa_name) {
   msa
 }
 
+#' Select the counties in a metropolitan statistical area
+#'
+#' Counties are matched on the CBSA code in the `CBSAFP` column of TIGER/Line
+#' counties, which is the same as the `GEOID` of the ACS metropolitan
+#' statistical area.
+#'
+#' @param counties Counties from [load_county()] with a `CBSAFP` column for
+#'   every state in the MSA, e.g. from [bind_sf()].
+#' @param msa A single metropolitan statistical area from [filter_msa()].
+#' @param state_fips FIPS codes for the states listed for the MSA. Used to check
+#'   that the selected counties come from all listed states and cover the MSA
+#'   (which fails if a state is missing from the list).
+#' @param min_coverage Minimum share of the MSA area covered by the selected
+#'   counties.
+#' @returns The (unclipped) counties in the MSA.
+select_msa_counties <- function(
+  counties,
+  msa,
+  state_fips = NULL,
+  min_coverage = 0.99
+) {
+  msa_counties <- dplyr::filter(counties, .data[["CBSAFP"]] %in% msa$GEOID)
+
+  if (nrow(msa_counties) == 0) {
+    cli::cli_abort(
+      c(
+        "No counties have a {.field CBSAFP} matching {.val {msa$NAME}}
+        ({.val {msa$GEOID}}).",
+        "i" = "The county and ACS data may use different metropolitan area
+        delineations."
+      )
+    )
+  }
+
+  if (is.null(state_fips)) {
+    return(msa_counties)
+  }
+
+  unmatched <- setdiff(state_fips, msa_counties$STATEFP)
+
+  if (length(unmatched) > 0) {
+    cli::cli_abort(
+      "No counties in {.val {msa$NAME}} are in state{?s} with FIPS code{?s}
+      {.val {unmatched}}. Check {.field msa_states}."
+    )
+  }
+
+  msa_area <- sum(as.numeric(sf::st_area(msa)))
+  covered_area <- sum(as.numeric(sf::st_area(
+    sf::st_intersection(sf::st_union(msa_counties), sf::st_geometry(msa))
+  )))
+
+  if (covered_area / msa_area < min_coverage) {
+    cli::cli_abort(
+      c(
+        "The selected counties cover only
+        {round(100 * covered_area / msa_area, 1)}% of {.val {msa$NAME}}.",
+        "i" = "A state in the MSA may be missing from {.field msa_states}."
+      )
+    )
+  }
+
+  msa_counties
+}
+
+#' Combine a list of `sf` objects
+#'
+#' @param x A list of `sf` objects with the same columns.
+#' @param distinct_by Optional column used to drop duplicate features, e.g.
+#'   features in national files loaded with a filter for each state.
+#' @param filter_by Optional `sf` object. Only features intersecting its
+#'   bounding box are kept (geometry is not changed).
+bind_sf <- function(x, distinct_by = NULL, filter_by = NULL) {
+  x <- do.call(rbind, unname(x))
+
+  if (!is.null(distinct_by)) {
+    x <- x[!duplicated(x[[distinct_by]]), ]
+  }
+
+  if (!is.null(filter_by)) {
+    bbox <- sf::st_as_sfc(sf::st_bbox(filter_by))
+    x <- x[lengths(sf::st_intersects(x, bbox)) > 0, ]
+  }
+
+  x
+}
+
 #' Check that a county is located in a metropolitan statistical area
 #'
-#' Uses a point on the surface of the county to avoid errors from differences
-#' in boundary generalization.
+#' Compares the CBSA code in the `CBSAFP` column of the county to the `GEOID`
+#' of the metropolitan statistical area.
 #'
 #' @returns The `msa` input if the check passes.
 check_county_in_msa <- function(county, msa) {
-  county_pt <- county |>
-    sf::st_geometry() |>
-    sf::st_union() |>
-    sf::st_point_on_surface() |>
-    sf::st_transform(crs = sf::st_crs(msa))
-
-  in_msa <- lengths(sf::st_intersects(county_pt, msa)) > 0
-
-  if (!all(in_msa)) {
+  if (!all(county$CBSAFP %in% msa$GEOID)) {
     cli::cli_abort(
       "County {.val {county$NAMELSAD}} is not located in
       {.val {msa$NAME}}."
