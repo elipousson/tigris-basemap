@@ -9,40 +9,131 @@ output: github_document
 # tigris-basemap
 
 <!-- badges: start -->
-[![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Project Status: Concept – Minimal or no implementation has been done yet, or the repository is only intended to be a limited example, demo, or proof-of-concept.](https://www.repostatus.org/badges/latest/concept.svg)](https://www.repostatus.org/#concept)
+
+[![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Project Status: Concept – Minimal or no implementation has been done yet, or the repository is only intended to be a limited example, demo, or proof-of-concept.](https://www.repostatus.org/badges/latest/concept.svg)](https://www.repostatus.org/#concept)
+
 <!-- badges: end -->
 
 The goal of tigris-basemap is to share a reproducible data pipeline (RAP) built with `{targets}` and `{tigris}` for creating static basemaps of counties and metropolitan areas in the United States of America using spatial data from the Census Bureau and USGS.
 
-At present this pipeline relies on development versions of both `{tigris}` and `{arcgislayers}`. These can be installed using `{pak}` or `{devtools}`:
+At present this pipeline relies on development versions of `{tigris}` and `{rmapshaper}`. These can be installed using `{pak}` or `{devtools}`:
 
 
-```r
+``` r
 pak::pkg_install("elipousson/tigris")
-pak::pkg_install("elipousson/arcgislayers")
+pak::pkg_install("elipousson/rmapshaper")
 ```
+
+## Configuring geographies
+
+The geographies used by the pipeline are specified in `geographies.yml`. Each entry under the `geographies` key creates a county basemap and a regional basemap for a focal county and the metropolitan statistical area (MSA) that contains it:
+
+```yaml
+geographies:
+  baltimore_city:
+    name: Baltimore City
+    description: County and regional basemaps for Baltimore City, Maryland.
+    tigris_year: 2023
+    state: MD
+    county: Baltimore city
+    msa: Baltimore-Columbia-Towson, MD Metro Area
+    division:
+      type: custom
+      url: https://services1.arcgis.com/mVFRs7NF4iFitgbY/arcgis/rest/services/Community_Statistical_Areas_(CSAs)__Reference_Boundaries/FeatureServer/0
+      name_col: Community
+      snap_to_tracts: true
+```
+
+- `name`, `tigris_year`, `state`, `county`, and `msa` are required. `msa` must use the name of the MSA from the American Community Survey (ACS) and `state` is the state of the focal county.
+- MSAs can include multiple states, e.g. `Washington-Arlington-Alexandria, DC-VA-MD-WV Metro Area`. The states in the MSA are parsed from the name or can be listed with the optional `msa_states` field (which must match the name). The counties in the MSA are selected using the CBSA code (`CBSAFP`) for each county, and the pipeline checks that the focal county is in the MSA and that the selected counties cover the MSA.
+- `division` is optional. `type` can be `tract` or `zcta` (both loaded with `{tigris}`) or `custom`. Custom divisions require either a `path` to a file readable by `sf::read_sf()` or a `url` for an ArcGIS layer. Set `snap_to_tracts: true` with a `name_col` to rebuild custom divisions from census tracts.
+
+Target names use the entry key as a suffix, e.g. `county_basemap_baltimore_city`. Data shared by multiple geographies is only loaded once: national data for each year (e.g. `us_msa_2023`), state data for each state and year, including every state in each MSA (e.g. `counties_md_2023` is used for both the Baltimore and Washington, DC MSAs), and MSA data for each MSA and year (e.g. `msa_water_baltimore_md_2023`). To build the targets for a single geography, use:
+
+
+``` r
+targets::tar_make(names = tidyselect::ends_with("_baltimore_city"))
+```
+
+## Configuring data sources and basemap styles
+
+Every external data source used by the pipeline is listed in `sources.yml` with a description, the `{tigris}` function or ArcGIS layer URL used to load it, and optional `args` for the loader function and default `processing_steps`:
+
+```yaml
+sources:
+  usgs_pad:
+    name: USGS Protected Areas Database (PAD-US) by manager name
+    description: >-
+      Protected areas loaded with load_arc_url() and filtered by the area of
+      interest. Small parcels are dropped on the server with a `where` clause
+      on GIS_Acres.
+    type: arcgis
+    url: https://services.arcgis.com/v01gqwM5QqNysAAi/ArcGIS/rest/services/Manager_Name/FeatureServer/0
+    args:
+      where: GIS_Acres >= 20
+    processing_steps:
+      - name: st_make_valid
+```
+
+Source `processing_steps` (such as repairing invalid geometry) always run first. Loaders only download data and transform it to the basemap CRS: clipping and other changes to geometry are explicit processing steps.
+
+The data, view, and style layers for the county and MSA basemaps are specified in `basemaps.yml`. Style layers follow the [MapLibre Style Spec](https://maplibre.org/maplibre-style-spec/layers/) and are drawn in order with `ggplot2::geom_sf()`. Each layer can use `processing_steps` named after the function they call (e.g. `ms_simplify` or `st_buffer`) to prepare geometry for cartographic purposes:
+
+```yaml
+basemaps:
+  msa:
+    data:
+      water:
+        source: tigris_area_water
+        processing_steps:
+          - name: ms_clip
+            args:
+              clip:
+                source: msa_counties
+              remove_slivers: true
+    staging:
+      metro_areas:
+        source: tigris_metro_divisions
+    view:
+      bounds:
+        source: [counties, buffer, water]
+    layers:
+      - id: water
+        type: fill
+        source: water
+        processing_steps:
+          - name: ms_simplify
+            args:
+              keep: 0.02
+          - name: st_union
+        paint:
+          fill-color: "#66B7C9"
+```
+
+Data that is loaded by the pipeline but not yet used by a basemap is listed under `staging`. See [`docs/style-spec.md`](docs/style-spec.md) for the full schema, the supported processing steps, and how MapLibre properties map onto ggplot2 arguments.
+
+Settings from both files are inserted directly into the target commands, so changing the settings for one source or layer only invalidates the targets that use it. Changes to `paint` or `layout` properties only invalidate the basemap targets (e.g. `msa_basemap_baltimore_city`) without re-running any processing steps.
+
+## Examples
 
 Here is an example of a county map created with this pipeline:
 
 
-```r
-targets::tar_read_raw("county_basemap")
+``` r
+targets::tar_read(county_basemap_baltimore_city)
 ```
 
-![plot of chunk unnamed-chunk-3](figure/unnamed-chunk-3-1.png)
+![plot of chunk unnamed-chunk-4](figure/unnamed-chunk-4-1.png)
 
 This map does not include the outside border of the county as it is intended to be used in combination with a data layer and then county boundary applied as a foreground layer.
 
 Here is an example of a regional map created with this pipeline:
 
 
-```r
-targets::tar_read_raw("msa_basemap")
+``` r
+targets::tar_read(msa_basemap_baltimore_city)
 ```
 
-![plot of chunk unnamed-chunk-4](figure/unnamed-chunk-4-1.png)
+![plot of chunk unnamed-chunk-5](figure/unnamed-chunk-5-1.png)
 
-The design of both maps are created for use in Baltimore City, Maryland and the Baltimore-Columbia-Towson, MD Metro Area. The pipeline works with other counties and metro areas but has not been tested extensively and likely will not work with all geographies. 
- 
+The design of both maps are created for use in Baltimore City, Maryland and the Baltimore-Columbia-Towson, MD Metro Area. The pipeline works with other counties and metro areas but has not been tested extensively and likely will not work with all geographies.
