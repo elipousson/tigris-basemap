@@ -1,0 +1,102 @@
+# Basemap specifications for the tigris-basemap pipeline.
+#
+# Each entry under `basemaps` defines the layers for one type of basemap. Each
+# layer uses a source from sources.yml and can override the source `defaults`
+# with `process` values for that basemap.
+#
+# Fields:
+#   description: Description of the basemap (optional).
+#   layers:      Layers used by the basemap (required).
+#   staging:     Layers that are loaded by the pipeline but not yet used by the
+#                basemap, e.g. potential layers that are still being designed
+#                (optional). Uses the same fields as `layers`.
+#
+# Layer fields:
+#   source:      Identifier for a source in sources.yml (required).
+#   description: Description of how the layer is used (optional).
+#   process:     Arguments passed to the loader function (and on to
+#                format_basemap_data()) that override the source defaults
+#                (optional). Do not set `clip`, `filter_geom`, `filter_by`, or
+#                `crs` here as these are set by the pipeline.
+
+basemaps:
+  county:
+    description: >-
+      County basemap without an outside border, intended for use with a data
+      layer and the county boundary as a foreground layer.
+    layers:
+      water:
+        source: usgs_nhd_waterbody
+        description: NHD waterbodies clipped to the focal county.
+        process:
+          simplify: true
+          smooth: false
+      roads:
+        source: tigris_primary_secondary_roads
+        description: Interstates and U.S. highways clipped to the focal county.
+        process:
+          road_type: [I, U]
+      parks:
+        source: usgs_pad
+        description: Protected areas within the focal county.
+        process:
+          min_area: 25
+          smooth: false
+    staging:
+      area_water:
+        source: tigris_area_water
+        description: >-
+          Census area water clipped to the focal county (an alternative to NHD
+          waterbodies).
+      water_lines:
+        source: usgs_nhd_flowline
+        description: NHD flowlines clipped to the focal county.
+        process:
+          dissolve: false
+          smooth: false
+          # where: "FCODE='46006'"
+
+  msa:
+    description: >-
+      Regional basemap for the MSA with the focal county highlighted and a
+      circular buffer around the focal county as a background.
+    layers:
+      water:
+        source: tigris_area_water
+        description: Census area water for all counties in the MSA.
+        process:
+          simplify: true
+          keep: 0.02
+          smooth: true
+      roads:
+        source: tigris_primary_secondary_roads
+        description: Interstates and U.S. highways within the MSA.
+        process:
+          road_type: [I, U]
+          simplify: true
+          keep: 0.03
+      parks:
+        source: usgs_pad
+        description: >-
+          Protected areas within a concave hull around the MSA.
+        process:
+          min_area: 40
+          simplify: true
+      urban_area:
+        source: tigris_urban_areas
+        description: Urban areas intersecting the focal county clipped to the MSA.
+    staging:
+      urban_area_land:
+        source: tigris_urban_areas
+        description: Urban areas with MSA water erased.
+      rail_lines:
+        source: tigris_rails
+        description: >-
+          Rail lines for the state (supported by plot_msa_basemap() but not
+          currently used).
+      metro_areas:
+        source: tigris_metro_divisions
+        description: Metropolitan divisions for the state.
+      combined_area:
+        source: tigris_combined_statistical_areas
+        description: Combined statistical area including the focal county.

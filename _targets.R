@@ -9,238 +9,298 @@ tar_option_set(
     "ggplot2",
     "dplyr"
   ),
-  format = "qs"
-)
-
-options(
-  tigris_use_cache = TRUE,
-  # TODO: Implement tigris year option
-  tigris_year = 2023,
-  basemap.crs = 3857,
-
-  # to adapt this pipeline for a different metro area
-  state.usps = "MD",
-  county.name = "Baltimore city",
-  division.url = "https://services1.arcgis.com/mVFRs7NF4iFitgbY/arcgis/rest/services/Community_Statistical_Areas_(CSAs)__Reference_Boundaries/FeatureServer/0"
+  format = "qs",
+  error = "continue"
 )
 
 tar_source()
 
-prep_tigris_admin <- tar_plan(
-  # FIXME: Allow handling of multiple states
-  state_fips = tigris:::validate_state(
-    state = getOption("state.usps")
-  ),
-  county_fips = tigris:::validate_county(
-    state = state_fips,
-    county = getOption("county.name")
-  ),
-  us_states = tigris::states(),
-  state = dplyr::filter(us_states, STATEFP == state_fips),
-  counties = load_county(state = state_fips),
-  county = load_county(
-    counties = counties,
-    state = state_fips,
-    county = county_fips,
-    simplify = FALSE
-  ),
-  metro_areas = sf::st_transform(
-    metro_divisions(filter_by = state),
-    crs = getOption("basemap.crs")
-  ),
-  targets::tar_target(
-    rail_lines,
-    tigris::rails(
-      filter_by = state
-    ) |>
-      sf::st_transform(getOption("basemap.crs"))
-  ),
-  us_msa = sf::st_transform(
-    tidycensus::get_acs(
-      geography = "metropolitan statistical area/micropolitan statistical area",
-      variables = "B01001_001",
-      geometry = TRUE
-    ),
-    crs = getOption("basemap.crs")
-  ),
-  msa = sf::st_filter(us_msa, county),
-  urban_area = load_urban_area(
-    county = county,
-    clip = msa,
-    crs = getOption("basemap.crs")
+options(
+  tigris_use_cache = TRUE,
+  basemap.crs = 3857
+)
+
+# To adapt this pipeline for a different county or metro area, add a new entry
+# to geographies.yml. Geography values are inserted into target commands by
+# tar_map() so changes to a geography invalidate only the affected targets.
+geography_values <- make_geography_values(read_geographies("geographies.yml"))
+
+# Data sources are specified in sources.yml and the processing for each layer of
+# the county and MSA basemaps is specified in basemaps.yml. Loader arguments are
+# inserted into target commands with `!!!` so changes to a source or layer
+# invalidate only the affected targets.
+source_config <- read_sources("sources.yml")
+basemap_config <- read_basemaps("basemaps.yml", sources = source_config)
+
+# Build static branches only if there are values to map over
+tar_map_values <- function(values, ...) {
+  if (nrow(values) == 0) {
+    return(NULL)
+  }
+
+  tar_map(values = values, ...)
+}
+
+# National data for each tigris year
+prep_national <- tar_map(
+  values = make_year_values(geography_values),
+  names = tigris_year,
+  descriptions = NULL,
+  tar_target(us_states, tigris::states(year = tigris_year)),
+  tar_target(
+    us_msa,
+    sf::st_transform(
+      tidycensus::get_acs(
+        year = tigris_year,
+        geometry = TRUE,
+        !!!source_args(source_config, "acs_msa")
+      ),
+      crs = getOption("basemap.crs")
+    )
   )
 )
 
-prep_division_geography <- tar_plan(
-  divisions_src = load_arc_url(
-    url = getOption("division.url"),
-    crs = getOption("basemap.crs") # ,
-    # clip = county,
-    # remove_slivers = FALSE
-  ),
-
-  # FIXME: Assumption that divisions are composed of component tracts may not be
-  # true in all cases
-  divisions = join_division_tracts(
-    divisions = divisions_src,
-    state_fips = state_fips,
-    county_fips = county_fips,
-    division_type = mapbaltimore::baltimore_tracts |>
-      sf::st_transform(crs = 3857),
-    # division_type = tigris::block_groups(
-    #   state = state_fips,
-    #   county = county_fips
-    # ),
-    division_col = "Community"
-  )
-)
-
-prep_county_features <- tar_plan(
-  water = load_area_water(
-    state = state_fips,
-    county = county_fips,
-    clip = county
-  ),
-  water_nhd = load_usgs_nhd(
-    filter_geom = sf::st_bbox(county),
-    clip = county,
-    smooth = FALSE,
-    simplify = TRUE
-  ),
-  water_nhd_lines = load_usgs_nhd(
-    url = "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/6",
-    filter_geom = sf::st_bbox(county),
-    dissolve = FALSE,
-    smooth = FALSE,
-    # where = "FCODE='46006'",
-    clip = county
-  ),
-  parks = load_usgs_pad(
-    filter_geom = county$geometry,
-    smooth = FALSE,
-    min_area = 25,
-    crs = getOption("basemap.crs")
-  ),
-  roads = load_primary_secondary_roads(
-    state = state_fips,
-    filter_by = county,
-    clip = county,
-    road_type = c("I", "U")
-  )
-)
-
-prep_msa_features <- tar_plan(
-  msa_water = load_area_water(
-    state = state_fips,
-    county = msa_counties[["COUNTYFP"]],
-    clip = msa_counties_full,
-    simplify = TRUE,
-    keep = 0.02,
-    smooth = TRUE
-  ),
-  msa_roads = load_primary_secondary_roads(
-    state = state_fips,
-    filter_by = msa,
-    clip = msa_counties_full,
-    road_type = c("I", "U"),
-    simplify = TRUE,
-    keep = 0.03
-  ),
-  msa_filter_geom = msa |>
-    sf::st_union(is_coverage = TRUE) |>
-    sf::st_geometry() |>
-    sf::st_concave_hull(0.1, allow_holes = FALSE) |>
-    sf::st_union(sf::st_union(msa)),
-  msa_parks = load_usgs_pad(
-    filter_geom = msa_filter_geom,
-    min_area = 40,
-    simplify = TRUE,
-    crs = getOption("basemap.crs")
-  ),
-  msa_urban_area = rmapshaper::ms_erase(
-    urban_area,
-    erase = msa_water
-  )
-)
-
-format_msa_counties <- tar_plan(
-  msa_counties_init = filter_clip(counties, clip = msa),
-  msa_counties_full = dplyr::filter(
+# State data for each state and tigris year
+prep_state <- tar_map(
+  values = make_state_values(geography_values),
+  names = state_key,
+  descriptions = NULL,
+  tar_target(state_fips, validate_state(state = state_usps)),
+  tar_target(state, dplyr::filter(us_states_ref, STATEFP == state_fips)),
+  tar_target(
     counties,
-    .data[["COUNTYFP"]] %in% msa_counties_init[["COUNTYFP"]]
+    load_county(
+      state = state_fips,
+      year = tigris_year,
+      !!!source_args(source_config, "tigris_counties")
+    )
   ),
-  msa_counties = ms_clip_ext(
-    target = msa_counties_full,
-    clip = msa
+  tar_target(
+    metro_areas,
+    sf::st_transform(
+      tigris::metro_divisions(filter_by = state, year = tigris_year),
+      crs = getOption("basemap.crs")
+    )
+  ),
+  tar_target(
+    rail_lines,
+    tigris::rails(filter_by = state, year = tigris_year) |>
+      sf::st_transform(getOption("basemap.crs"))
   )
 )
 
-# Replace the target list below with your own:
-tigris_basemap_plan <- tar_plan(
-  prep_tigris_admin,
-  prep_division_geography,
-  format_msa_counties,
-  combined_area = combined_statistical_areas(
-    filter_by = county
-  ),
-  prep_county_features,
-  prep_msa_features,
-  county_basemap = plot_county_basemap(
-    water = water_nhd,
-    roads = roads,
-    parks = parks # ,
-    # divisions = divisions
-  ),
-  county_basemap_export = export_rds(
-    county_basemap,
-    paste0(
-      state_fips,
-      county_fips,
-      "_county_basemap.rds"
+# MSA data for each MSA and tigris year
+# TODO: Add support for multi-state MSAs
+prep_msa <- tar_map(
+  values = make_msa_values(geography_values),
+  names = msa_key,
+  descriptions = NULL,
+  tar_target(msa, filter_msa(us_msa_ref, msa_name = msa_name)),
+  tar_target(msa_counties_init, filter_clip(counties_ref, clip = msa)),
+  tar_target(
+    msa_counties_full,
+    dplyr::filter(
+      counties_ref,
+      .data[["COUNTYFP"]] %in% msa_counties_init[["COUNTYFP"]]
     )
   ),
-  county_buffers = make_county_buffers(county),
-  msa_basemap = plot_msa_basemap(
-    counties = msa_counties,
-    urban_area = urban_area,
-    water = msa_water,
-    roads = msa_roads,
-    county = county,
-    parks = msa_parks,
-    bg = county_buffers[5, ]
-  ),
-  county_buffers_export = export_rds(
-    county_buffers,
-    paste0(
-      state_fips,
-      county_fips,
-      "_county_buffers.rds"
-    )
-  ),
-  msa_basemap_export = export_rds(
-    msa_basemap,
-    paste0(
-      state_fips,
-      county_fips,
-      "_msa_basemap.rds"
-    )
-  ),
-  county_export = export_rds(
-    county,
-    paste0(
-      state_fips,
-      county_fips,
-      "_county.rds"
-    )
-  ),
-  msa_counties_export = export_rds(
+  tar_target(
     msa_counties,
-    paste0(
-      state_fips,
-      county_fips,
-      "_msa_counties.rds"
+    ms_clip_ext(target = msa_counties_full, clip = msa)
+  ),
+  tar_target(
+    msa_water,
+    load_area_water(
+      state = state_fips_ref,
+      county = msa_counties[["COUNTYFP"]],
+      year = tigris_year,
+      clip = msa_counties_full,
+      !!!layer_args(basemap_config, "msa", "water")
+    )
+  ),
+  tar_target(
+    msa_roads,
+    load_primary_secondary_roads(
+      state = state_fips_ref,
+      year = tigris_year,
+      filter_by = msa,
+      clip = msa_counties_full,
+      !!!layer_args(basemap_config, "msa", "roads")
+    )
+  ),
+  tar_target(
+    msa_filter_geom,
+    msa |>
+      sf::st_union(is_coverage = TRUE) |>
+      sf::st_geometry() |>
+      sf::st_concave_hull(0.1, allow_holes = FALSE) |>
+      sf::st_union(sf::st_union(msa))
+  ),
+  tar_target(
+    msa_parks,
+    load_usgs_pad(
+      filter_geom = msa_filter_geom,
+      crs = getOption("basemap.crs"),
+      !!!layer_args(basemap_config, "msa", "parks")
     )
   )
 )
 
-tigris_basemap_plan
+# Tracked files for custom divisions loaded from a file path
+prep_division_files <- tar_map_values(
+  values = dplyr::filter(geography_values, !is.na(division_path)) |>
+    dplyr::select(id, division_path),
+  names = id,
+  descriptions = NULL,
+  tar_file(division_file, division_path)
+)
+
+# County data, basemaps, and exports for each geography
+prep_geography <- tar_map(
+  values = geography_values,
+  names = id,
+  descriptions = NULL,
+  tar_target(
+    county_fips,
+    validate_county(state = state_fips_ref, county = county_name)
+  ),
+  tar_target(
+    county,
+    load_county(
+      counties = counties_ref,
+      state = state_fips_ref,
+      county = county_fips,
+      simplify = FALSE
+    )
+  ),
+  tar_target(
+    county_msa,
+    check_county_in_msa(county = county, msa = msa_ref),
+    description = "MSA validated to include the focal county"
+  ),
+  tar_target(
+    urban_area,
+    load_urban_area(
+      county = county,
+      clip = county_msa,
+      year = tigris_year,
+      crs = getOption("basemap.crs")
+    )
+  ),
+  tar_target(
+    combined_area,
+    tigris::combined_statistical_areas(filter_by = county, year = tigris_year)
+  ),
+  tar_target(
+    divisions,
+    load_divisions(
+      type = division_type,
+      source = division_src_ref,
+      county = county,
+      state_fips = state_fips_ref,
+      county_fips = county_fips,
+      year = tigris_year,
+      name_col = division_name_col,
+      snap_to_tracts = division_snap_to_tracts,
+      crs = getOption("basemap.crs")
+    )
+  ),
+  tar_target(
+    water,
+    load_area_water(
+      state = state_fips_ref,
+      county = county_fips,
+      year = tigris_year,
+      clip = county,
+      !!!layer_args(basemap_config, "county", "area_water")
+    )
+  ),
+  tar_target(
+    water_nhd,
+    load_usgs_nhd(
+      filter_geom = sf::st_bbox(county),
+      clip = county,
+      !!!layer_args(basemap_config, "county", "water")
+    )
+  ),
+  tar_target(
+    water_nhd_lines,
+    load_usgs_nhd(
+      filter_geom = sf::st_bbox(county),
+      clip = county,
+      !!!layer_args(basemap_config, "county", "water_lines")
+    )
+  ),
+  tar_target(
+    parks,
+    load_usgs_pad(
+      filter_geom = county$geometry,
+      crs = getOption("basemap.crs"),
+      !!!layer_args(basemap_config, "county", "parks")
+    )
+  ),
+  tar_target(
+    roads,
+    load_primary_secondary_roads(
+      state = state_fips_ref,
+      year = tigris_year,
+      filter_by = county,
+      clip = county,
+      !!!layer_args(basemap_config, "county", "roads")
+    )
+  ),
+  tar_target(
+    msa_urban_area,
+    rmapshaper::ms_erase(urban_area, erase = msa_water_ref)
+  ),
+  tar_target(
+    county_basemap,
+    plot_county_basemap(
+      water = water_nhd,
+      roads = roads,
+      parks = parks # ,
+      # divisions = divisions
+    )
+  ),
+  tar_target(county_buffers, make_county_buffers(county)),
+  tar_target(
+    msa_basemap,
+    plot_msa_basemap(
+      counties = msa_counties_ref,
+      urban_area = urban_area,
+      water = msa_water_ref,
+      roads = msa_roads_ref,
+      county = county,
+      parks = msa_parks_ref,
+      bg = county_buffers[5, ]
+    )
+  ),
+  tar_target(
+    county_basemap_export,
+    export_rds(county_basemap, paste0(id, "_county_basemap.rds"))
+  ),
+  tar_target(
+    county_buffers_export,
+    export_rds(county_buffers, paste0(id, "_county_buffers.rds"))
+  ),
+  tar_target(
+    msa_basemap_export,
+    export_rds(msa_basemap, paste0(id, "_msa_basemap.rds"))
+  ),
+  tar_target(
+    county_export,
+    export_rds(county, paste0(id, "_county.rds"))
+  ),
+  tar_target(
+    msa_counties_export,
+    export_rds(msa_counties_ref, paste0(id, "_msa_counties.rds"))
+  )
+)
+
+list(
+  prep_national,
+  prep_state,
+  prep_msa,
+  prep_division_files,
+  prep_geography
+)

@@ -220,18 +220,20 @@ filter_counties <- function(
 #' @inheritParams format_basemap_data
 #' @importFrom rmapshaper ms_clip
 #' @importFrom sf st_crs st_transform
+#' @param url ArcGIS layer URL for PAD-US data. See `usgs_pad` in sources.yml.
+#' @param ... Additional arguments passed to [format_basemap_data()].
 load_usgs_pad <- function(
+  url,
   filter_geom = NULL,
   ...,
   clip = filter_geom,
-  keep = 0.025,
-  min_area = 20,
+  min_area = NULL,
   area_units = "acres",
   crs = 3857
 ) {
   data <- arcgislayers::arc_read(
     # FIXME: Add support for multiple PAD layers or swap this function for a dedicated PAD data package
-    url = "https://services.arcgis.com/v01gqwM5QqNysAAi/ArcGIS/rest/services/Manager_Name/FeatureServer/0",
+    url = url,
     filter_geom = filter_geom,
     crs = crs
   )
@@ -251,24 +253,23 @@ load_usgs_pad <- function(
       )
   }
 
-  format_basemap_data(data, keep = keep, clip = clip, crs = NULL, ...)
+  format_basemap_data(data, clip = clip, crs = NULL, ...)
 }
 
 #' Load a county or counties using `tigris::counties`
+#' @param ... Additional arguments passed to [format_basemap_data()].
 #' @importFrom tigris counties
 #' @importFrom package function
 load_county <- function(
   state,
   counties = NULL,
   county = NULL,
+  year = NULL,
   ...,
   validate = TRUE,
-  multiple = TRUE,
-  simplify = TRUE,
-  keep = 0.075,
   crs = 3857
 ) {
-  counties <- counties %||% tigris::counties(state = state, ...)
+  counties <- counties %||% tigris::counties(state = state, year = year)
 
   county <- filter_counties(
     counties,
@@ -277,17 +278,12 @@ load_county <- function(
     validate = validate
   )
 
-  format_basemap_data(
-    county,
-    simplify = simplify,
-    keep = keep,
-    smooth = FALSE,
-    dissolve = FALSE,
-    crs = crs
-  )
+  format_basemap_data(county, crs = crs, ...)
 }
 
-#' Load
+#' Load primary and secondary roads using `tigris::primary_secondary_roads()`
+#' @param road_type Route types to keep. If `NULL`, all roads are kept.
+#' @param ... Additional arguments passed to [format_basemap_data()].
 #' @importFrom tigris primary_secondary_roads
 #' @importFrom dplyr filter
 load_primary_secondary_roads <- function(
@@ -295,11 +291,8 @@ load_primary_secondary_roads <- function(
   year = NULL,
   filter_by = NULL,
   ...,
-  dissolve = FALSE,
-  simplify = FALSE,
-  smooth = FALSE,
   clip = NULL,
-  road_type = c("I", "U", "S"),
+  road_type = NULL,
   crs = 3857
 ) {
   roads <- tigris::primary_secondary_roads(
@@ -313,15 +306,7 @@ load_primary_secondary_roads <- function(
       dplyr::filter(RTTYP %in% road_type)
   }
 
-  format_basemap_data(
-    roads,
-    clip = clip,
-    crs = crs,
-    dissolve = dissolve,
-    simplify = simplify,
-    smooth = smooth,
-    ...
-  )
+  format_basemap_data(roads, clip = clip, crs = crs, ...)
 }
 
 layer_primary_secondary_roads <- function(
@@ -369,17 +354,15 @@ layer_primary_secondary_roads <- function(
   road_layers
 }
 
-#' Load USGS National Hydrographical (sp?) Data (NHD)
+#' Load USGS National Hydrography Dataset (NHD) data
+#' @param url ArcGIS layer URL for NHD data. See `usgs_nhd_waterbody` and
+#'   `usgs_nhd_flowline` in sources.yml.
+#' @param ... Additional arguments passed to [format_basemap_data()].
 load_usgs_nhd <- function(
-  # FIXME: Add support for multiple URLs from NHD data
-  url = "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/12",
-  # url = "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/10",
+  url,
   filter_geom = NULL,
   where = NULL,
   ...,
-  keep = 0.07,
-  method = "chaikin",
-  refinements = 1,
   clip = NULL,
   crs = 3857
 ) {
@@ -390,30 +373,17 @@ load_usgs_nhd <- function(
     crs = crs
   )
 
-  # FIXME: Standardize what parameters are or are not being passed to
-  # `format_basemap_data`
-  format_basemap_data(
-    nhd,
-    keep = keep,
-    method = method,
-    refinements = refinements,
-    clip = clip,
-    crs = NULL,
-    ...
-  )
+  format_basemap_data(nhd, clip = clip, crs = NULL, ...)
 }
 
 #' Load water for a county or counties in a single state using
 #' `tigris::area_water()`
+#' @param ... Additional arguments passed to [format_basemap_data()].
 load_area_water <- function(
   state,
   county,
   year = NULL,
   ...,
-  keep = 0.004,
-  smooth = FALSE,
-  method = "chaikin",
-  refinements = 1,
   clip = NULL,
   crs = 3857
 ) {
@@ -430,16 +400,7 @@ load_area_water <- function(
     water <- tigris::area_water(state = state, county = county, year = year)
   }
 
-  format_basemap_data(
-    water,
-    keep = keep,
-    smooth = smooth,
-    method = method,
-    refinements = refinements,
-    clip = clip,
-    crs = crs,
-    ...
-  )
+  format_basemap_data(water, clip = clip, crs = crs, ...)
 }
 
 #' Create a set of circular buffer areas around a county centroid
@@ -792,4 +753,71 @@ join_county_tracts <- function(
     ) |>
     sf::st_make_valid() |>
     rmapshaper::ms_simplify(keep = keep)
+}
+
+#' Load sub-county divisions for a county
+#'
+#' @param type Division type: "tract", "zcta", or "custom". If `NA` or `NULL`,
+#'   returns `NULL`.
+#' @param source For custom divisions, a file path readable by [sf::read_sf()]
+#'   or an ArcGIS layer URL readable by [arcgislayers::arc_read()].
+#' @param county County `sf` object used to filter and clip divisions.
+#' @param name_col Column identifying custom divisions. Required if
+#'   `snap_to_tracts = TRUE`.
+#' @param snap_to_tracts If `TRUE`, rebuild custom divisions from the census
+#'   tracts with the largest overlap with each division.
+load_divisions <- function(
+  type,
+  source = NULL,
+  county,
+  state_fips,
+  county_fips,
+  year = NULL,
+  name_col = NULL,
+  snap_to_tracts = FALSE,
+  crs = 3857
+) {
+  if (is.null(type) || is.na(type)) {
+    return(NULL)
+  }
+
+  if (type == "tract") {
+    divisions <- tigris::tracts(
+      state = state_fips,
+      county = county_fips,
+      year = year
+    )
+
+    return(format_basemap_data(divisions, crs = crs))
+  }
+
+  if (type == "zcta") {
+    # ZCTAs are only available nationally for recent years so filter by county
+    divisions <- tigris::zctas(year = year, filter_by = county)
+
+    return(format_basemap_data(divisions, clip = county, crs = crs))
+  }
+
+  if (grepl("^https?://", source)) {
+    divisions <- load_arc_url(url = source, crs = crs)
+  } else {
+    divisions <- sf::read_sf(source) |>
+      sf::st_transform(crs = crs)
+  }
+
+  if (!snap_to_tracts) {
+    return(ms_clip_ext(divisions, clip = county))
+  }
+
+  join_division_tracts(
+    divisions = divisions,
+    crs = crs,
+    division_type = tigris::tracts(
+      state = state_fips,
+      county = county_fips,
+      year = year
+    ),
+    division_col = name_col,
+    make_inner_lines = FALSE
+  )
 }

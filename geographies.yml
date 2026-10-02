@@ -1,0 +1,45 @@
+# Geography specifications for the tigris-basemap pipeline.
+#
+# Each entry under `geographies` defines one basemap geography. The entry key
+# (e.g. `baltimore_city`) is used as a suffix for target names and output files
+# and must use only lowercase letters, numbers, and underscores.
+#
+# Data shared between geographies is only loaded once: national data for each
+# `tigris_year`, state data for each `state` and `tigris_year`, and MSA data for
+# each `msa` and `tigris_year`.
+#
+# Fields:
+#   name:         Display name for the geography (required).
+#   description:  Longer description of the geography (optional).
+#   tigris_year:  Year used for {tigris} and ACS downloads (required).
+#   state:        State USPS abbreviation, name, or FIPS code (required).
+#   county:       Focal county name or FIPS code within `state` (required).
+#   msa:          ACS name of the metropolitan statistical area that includes
+#                 the focal county (required). All states included in the MSA
+#                 must be listed in `state`. Multi-state MSAs are not yet
+#                 supported.
+#   division:     Sub-county divisions (optional) with the fields:
+#     type:           One of `tract`, `zcta`, or `custom` (required).
+#     path:           File readable by sf::read_sf() (custom only).
+#     url:            ArcGIS layer URL readable by arc_read() (custom only).
+#                     Custom divisions require exactly one of `path` or `url`.
+#     name_col:       Column identifying custom divisions (custom only).
+#     snap_to_tracts: If true, rebuild custom divisions from census tracts
+#                     (custom only, requires `name_col`).
+
+geographies:
+  baltimore_city:
+    name: Baltimore City
+    description: >-
+      County and regional basemaps for Baltimore City, Maryland and the
+      Baltimore-Columbia-Towson, MD Metro Area with Community Statistical Areas
+      (CSAs) as sub-county divisions.
+    tigris_year: 2023
+    state: MD
+    county: Baltimore city
+    msa: Baltimore-Columbia-Towson, MD Metro Area
+    division:
+      type: custom
+      url: https://services1.arcgis.com/mVFRs7NF4iFitgbY/arcgis/rest/services/Community_Statistical_Areas_(CSAs)__Reference_Boundaries/FeatureServer/0
+      name_col: Community
+      snap_to_tracts: true

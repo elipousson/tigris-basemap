@@ -1,0 +1,182 @@
+# External data sources for the tigris-basemap pipeline.
+#
+# This file is a catalog of every external source used (or available for use)
+# by the pipeline. How each source is processed for a specific basemap is set
+# in basemaps.yml. Custom division sources are set per geography in
+# geographies.yml.
+#
+# Fields:
+#   name:        Display name for the source (required).
+#   description: What the data is, how it is loaded, and any fixed filtering or
+#                processing (required).
+#   type:        One of `tigris`, `arcgis`, or `acs` (required).
+#   function:    Function used to load the data, e.g. `tigris::area_water`
+#                (required for `tigris` and `acs` sources).
+#   url:         ArcGIS layer URL (required for `arcgis` sources).
+#   attribution: Data provider (optional).
+#   defaults:    Arguments passed to the loader function (and on to
+#                format_basemap_data()) wherever the source is used (optional).
+#                Values can be overridden for a basemap layer in basemaps.yml.
+#                Do not set `clip`, `filter_geom`, `filter_by`, or `crs` here as
+#                these are set by the pipeline.
+
+sources:
+  # Census Bureau TIGER/Line data loaded with {tigris} ------------------------
+  tigris_states:
+    name: States
+    description: >-
+      All states loaded once for each year with tigris::states() and filtered
+      to the state for each geography.
+    type: tigris
+    function: tigris::states
+    attribution: U.S. Census Bureau
+
+  tigris_counties:
+    name: Counties
+    description: >-
+      Counties loaded for each state and year with tigris::counties() via
+      load_county(). Simplified state counties are used to identify and clip MSA
+      counties. The focal county for each geography is taken from the state
+      counties without additional simplification.
+    type: tigris
+    function: tigris::counties
+    attribution: U.S. Census Bureau
+    defaults:
+      simplify: true
+      keep: 0.075
+
+  tigris_metro_divisions:
+    name: Metropolitan divisions
+    description: >-
+      Metropolitan divisions loaded for each state and year with
+      tigris::metro_divisions() filtered by the state boundary.
+    type: tigris
+    function: tigris::metro_divisions
+    attribution: U.S. Census Bureau
+
+  tigris_combined_statistical_areas:
+    name: Combined statistical areas
+    description: >-
+      Combined statistical areas loaded for each geography with
+      tigris::combined_statistical_areas() filtered by the focal county.
+    type: tigris
+    function: tigris::combined_statistical_areas
+    attribution: U.S. Census Bureau
+
+  tigris_urban_areas:
+    name: Urban areas
+    description: >-
+      Urban areas loaded for each geography with tigris::urban_areas() via
+      load_urban_area(), filtered by the focal county and clipped to the MSA.
+    type: tigris
+    function: tigris::urban_areas
+    attribution: U.S. Census Bureau
+
+  tigris_area_water:
+    name: Area hydrography
+    description: >-
+      Water areas loaded by county with tigris::area_water() via
+      load_area_water(). Used for the focal county and for all counties in the
+      MSA.
+    type: tigris
+    function: tigris::area_water
+    attribution: U.S. Census Bureau
+    defaults:
+      keep: 0.004
+      method: chaikin
+      refinements: 1
+
+  tigris_primary_secondary_roads:
+    name: Primary and secondary roads
+    description: >-
+      Primary and secondary roads loaded by state with
+      tigris::primary_secondary_roads() via load_primary_secondary_roads() and
+      filtered by route type (I = Interstate, U = U.S. Highway, S = State
+      Highway).
+    type: tigris
+    function: tigris::primary_secondary_roads
+    attribution: U.S. Census Bureau
+    defaults:
+      road_type: [I, U, S]
+
+  tigris_rails:
+    name: Rail lines
+    description: >-
+      National rail lines loaded for each state and year with tigris::rails()
+      filtered by the state boundary.
+    type: tigris
+    function: tigris::rails
+    attribution: U.S. Census Bureau
+
+  tigris_tracts:
+    name: Census tracts
+    description: >-
+      Census tracts loaded for the focal county with tigris::tracts() via
+      load_divisions(). Used for `tract` divisions and to snap custom divisions
+      to tracts.
+    type: tigris
+    function: tigris::tracts
+    attribution: U.S. Census Bureau
+
+  tigris_zctas:
+    name: ZIP Code Tabulation Areas (ZCTAs)
+    description: >-
+      National ZCTAs loaded with tigris::zctas() via load_divisions(), filtered
+      by and clipped to the focal county. Used for `zcta` divisions.
+    type: tigris
+    function: tigris::zctas
+    attribution: U.S. Census Bureau
+
+  # American Community Survey data loaded with {tidycensus} -------------------
+  acs_msa:
+    name: Metropolitan and micropolitan statistical areas
+    description: >-
+      Metropolitan and micropolitan statistical areas with total population
+      loaded for each year from the ACS 5-year estimates with
+      tidycensus::get_acs(). Filtered by name to the MSA for each geography.
+    type: acs
+    function: tidycensus::get_acs
+    attribution: U.S. Census Bureau
+    defaults:
+      geography: metropolitan statistical area/micropolitan statistical area
+      variables: B01001_001
+
+  # USGS data loaded from ArcGIS services with {arcgislayers} -----------------
+  usgs_pad:
+    name: USGS Protected Areas Database (PAD-US) by manager name
+    description: >-
+      Protected areas loaded with load_usgs_pad(), filtered by the area of
+      interest and to a minimum area (in acres) to drop small parcels.
+    type: arcgis
+    url: https://services.arcgis.com/v01gqwM5QqNysAAi/ArcGIS/rest/services/Manager_Name/FeatureServer/0
+    attribution: U.S. Geological Survey (USGS) Gap Analysis Project
+    defaults:
+      min_area: 20
+      area_units: acres
+      keep: 0.025
+
+  usgs_nhd_waterbody:
+    name: USGS National Hydrography Dataset (NHD) waterbodies
+    description: >-
+      Large-scale NHD waterbodies loaded with load_usgs_nhd(), filtered by the
+      bounding box of the area of interest.
+    type: arcgis
+    url: https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/12
+    attribution: U.S. Geological Survey (USGS)
+    defaults:
+      keep: 0.07
+      method: chaikin
+      refinements: 1
+
+  usgs_nhd_flowline:
+    name: USGS National Hydrography Dataset (NHD) flowlines
+    description: >-
+      Large-scale NHD flowlines (streams and rivers) loaded with
+      load_usgs_nhd(), filtered by the bounding box of the area of interest.
+    type: arcgis
+    url: https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/6
+    attribution: U.S. Geological Survey (USGS)
+    defaults:
+      keep: 0.07
+      method: chaikin
+      refinements: 1
